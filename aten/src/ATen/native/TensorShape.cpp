@@ -1578,57 +1578,6 @@ Tensor tile_symint(const Tensor& self, SymIntArrayRef reps){
   return self.repeat_symint(reps);
 }
 
-//
-// templated for ArrayRef<int64_t> and SmallVector<int64_t> use cases
-//
-template <typename Vec>
-Tensor alias_with_sizes_and_strides(
-    const Tensor& self,
-    const Vec& sizes,
-    const Vec& strides) {
-  //caller should make sure that sizes and strides are valid for self
-  //(storage is sufficient, strides are non-negative, strides and sizes array size is the same)
-  Tensor self_;
-  if (self.is_quantized()) {
-    self_ = at::detail::make_tensor<QTensorImpl>(
-      c10::TensorImpl::VIEW, Storage(self.storage()), self.key_set(), self.dtype(), get_qtensorimpl(self)->quantizer());
-    auto* self_tmp_ = self_.unsafeGetTensorImpl();
-    self_tmp_->set_storage_offset(self.storage_offset());
-    self_tmp_->set_sizes_and_strides(sizes, strides);
-  } else {
-    self_ = at::detail::make_tensor<TensorImpl>(
-      c10::TensorImpl::VIEW, Storage(self.storage()), self.key_set(), self.dtype());
-    auto* self_tmp_ = self_.unsafeGetTensorImpl();
-    self_tmp_->set_storage_offset(self.storage_offset());
-    self_tmp_->set_sizes_and_strides(sizes, strides);
-  }
-  namedinference::propagate_names(self_, self);
-  return self_;
-}
-
-// specialization for symbolic shapes and strides.
-// SymIntArrayRef/ArrayRef<c10::SymInt> and SmallVector<c10::SymInt>/SymDimVector
-template <template <typename...> typename Container>
-Tensor alias_with_sizes_and_strides(
-    const Tensor& self,
-    const Container<c10::SymInt>& sizes,
-    const Container<c10::SymInt>& strides) {
-  //caller should make sure that sizes and strides are valid for self
-  //(storage is sufficient, strides are non-negative, strides and sizes array size is the same)
-  Tensor self_;
-  if (self.is_quantized()) {
-    self_ = at::detail::make_tensor<QTensorImpl>(
-      c10::TensorImpl::VIEW, Storage(self.storage()), self.key_set(), self.dtype(), get_qtensorimpl(self)->quantizer());
-    self_.unsafeGetTensorImpl()->set_sizes_and_strides(sizes, strides, self.sym_storage_offset());
-  } else {
-    self_ = at::detail::make_tensor<TensorImpl>(
-    c10::TensorImpl::VIEW, Storage(self.storage()), self.key_set(), self.dtype());
-    self_.unsafeGetTensorImpl()->set_sizes_and_strides(sizes, strides, self.sym_storage_offset());
-  }
-  namedinference::propagate_names(self_, self);
-  return self_;
-}
-
 Tensor reshape_symint(const Tensor& self, c10::SymIntArrayRef proposed_shape) {
   if (self.is_sparse()) {
     AT_ERROR("reshape is not implemented for sparse tensors");
@@ -1735,8 +1684,9 @@ Tensor _reshape_alias(const Tensor& self, IntArrayRef sizes, IntArrayRef strides
   // This is only used by `reshape` in cases where it would otherwise have dispatched
   // to `view`. This removes the overhead of calling `view` which duplicates some of
   // the work that's already been done (`infer_size_dv` and `computeStride`).
-
-  return alias_with_sizes_and_strides(self, sizes, strides);
+  auto self_ = self.as_strided(sizes, strides);
+  namedinference::propagate_names(self_, self);
+  return self_;
 }
 
 Tensor reshape_as(const Tensor& self, const Tensor& other) {
@@ -3379,8 +3329,9 @@ inline Tensor view_impl(const Tensor& self, IntArrayRef size) {
   TORCH_CHECK(stride.has_value(), "view size is "
     "not compatible with input tensor's size and stride (at least one dimension"
     " spans across two contiguous subspaces). Use .reshape(...) instead.");
-  return alias_with_sizes_and_strides(self, inferred_size, *stride);
-
+  auto self_ = self.as_strided(inferred_size, *stride);
+  namedinference::propagate_names(self_, self);
+  return self_;
 }
 
 Tensor _unsafe_view(const Tensor& self, IntArrayRef size) {
@@ -3769,7 +3720,9 @@ Tensor view(const Tensor& self,
 }
 
 Tensor alias(const Tensor& self) {
-  return alias_with_sizes_and_strides(self, self.sym_sizes(), self.sym_strides());
+  auto self_ = self.as_strided_symint(self.sym_sizes(), self.sym_strides());
+  namedinference::propagate_names(self_, self);
+  return self_;
 }
 
 Tensor detach(const Tensor& self) {
